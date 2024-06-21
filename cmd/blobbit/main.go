@@ -62,18 +62,44 @@ var rootCmd = &cobra.Command{
 }
 
 type (
-	storePathKey  struct{}
-	coreConfigKey struct{}
+	storePathKey     struct{}
+	coreConfigKey    struct{}
+	keyringConfigKey struct{}
 )
 
 const (
-	nodeStoreFlag     = "node.store"
-	coreFlag          = "core.ip"
-	coreRPCFlag       = "core.rpc.port"
-	coreGRPCFlag      = "core.grpc.port"
-	blobNamespaceFlag = "blob.namespace"
-	blobDataFlag      = "blob.data"
+	keyringAccNameFlag = "keyring.accname"
+	keyringBackendFlag = "keyring.backend"
+	nodeStoreFlag      = "node.store"
+	coreFlag           = "core.ip"
+	coreRPCFlag        = "core.rpc.port"
+	coreGRPCFlag       = "core.grpc.port"
+	blobNamespaceFlag  = "blob.namespace"
+	blobDataFlag       = "blob.data"
 )
+
+const DefaultAccountName = "my_celes_key"
+
+var defaultKeyringBackend = keyring.BackendTest
+
+// Config contains configuration parameters for constructing
+// the node's keyring signer.
+type KeyringConfig struct {
+	KeyringAccName string
+	KeyringBackend string
+}
+
+func DefaulKeyringtConfig() KeyringConfig {
+	return KeyringConfig{
+		KeyringAccName: DefaultAccountName,
+		KeyringBackend: defaultKeyringBackend,
+	}
+}
+
+// Validate performs basic validation of the config.
+func (cfg *KeyringConfig) Validate() error {
+	return nil
+}
 
 // CoreConfig combines all configuration fields for managing the relationship with a Core node.
 type CoreConfig struct {
@@ -108,17 +134,27 @@ func NodeFlags() *flag.FlagSet {
 		"9090",
 		"Set a custom gRPC port for the core node connection. The --core.ip flag must also be provided.",
 	)
-	flag.String(
+	flags.String(
 		blobNamespaceFlag,
 		"1234567890",
 		"The namespace of the blob to submit",
 	)
-	flag.String(
+	flags.String(
 		blobDataFlag,
 		"some data",
 		"The blob data to submit",
 	)
-
+	flags.String(
+		keyringAccNameFlag,
+		"my_celes_key",
+		"Directs node's keyring signer to use the key prefixed with the given string.",
+	)
+	flags.String(
+		keyringBackendFlag,
+		defaultKeyringBackend,
+		fmt.Sprintf("Directs node's keyring signer to use the given backend. Default is %s.",
+			defaultKeyringBackend),
+	)
 	return flags
 }
 
@@ -142,6 +178,16 @@ func WithCoreConfig(ctx context.Context, config *CoreConfig) context.Context {
 	return context.WithValue(ctx, coreConfigKey{}, *config)
 }
 
+// ParseKeyringConfig reads the store path from the context.
+func ParseKeyringConfig(ctx context.Context) KeyringConfig {
+	return ctx.Value(keyringConfigKey{}).(KeyringConfig)
+}
+
+// WithKeyringConfig sets the node config in the Env.
+func WithKeyringConfig(ctx context.Context, config *KeyringConfig) context.Context {
+	return context.WithValue(ctx, keyringConfigKey{}, *config)
+}
+
 // ParseFlags parses Node flags from the given cmd and applies values to Env.
 func ParseFlags(ctx context.Context, cmd *cobra.Command) (context.Context, error) {
 	store := cmd.Flag(nodeStoreFlag).Value.String()
@@ -159,13 +205,24 @@ func ParseFlags(ctx context.Context, cmd *cobra.Command) (context.Context, error
 
 	rpc := cmd.Flag(coreRPCFlag).Value.String()
 	grpc := cmd.Flag(coreGRPCFlag).Value.String()
-	var cfg CoreConfig
+	var coreCfg CoreConfig
 
-	cfg.IP = coreIP
-	cfg.RPCPort = rpc
-	cfg.GRPCPort = grpc
+	coreCfg.IP = coreIP
+	coreCfg.RPCPort = rpc
+	coreCfg.GRPCPort = grpc
 
-	ctx = WithCoreConfig(ctx, &cfg)
+	ctx = WithCoreConfig(ctx, &coreCfg)
+
+	var keyringCfg KeyringConfig
+	keyringAccName := cmd.Flag(keyringAccNameFlag).Value.String()
+	if keyringAccName != "" {
+		keyringCfg.KeyringAccName = keyringAccName
+	}
+
+	keyringCfg.KeyringBackend = cmd.Flag(keyringBackendFlag).Value.String()
+
+	ctx = WithKeyringConfig(ctx, &keyringCfg)
+
 	return ctx, nil
 }
 
@@ -181,17 +238,19 @@ func Submit(fsets ...*flag.FlagSet) *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			encConf := encoding.MakeConfig(app.ModuleEncodingRegisters...)
-			ring, err := keyring.New(app.Name, keyring.BackendTest, StorePath(ctx), os.Stdin, encConf.Codec)
+			keyringCfg := ParseKeyringConfig(ctx)
+			ring, err := keyring.New(app.Name, keyringCfg.KeyringBackend, StorePath(ctx), os.Stdin, encConf.Codec)
 			if err != nil {
 				panic(err)
 			}
-			cfg := ParseCoreConfig(ctx)
+			coreCfg := ParseCoreConfig(ctx)
 			ns := namespace.MustNewV0([]byte(cmd.Flag(blobNamespaceFlag).Value.String()))
 			blob, err := blobtypes.NewBlob(ns, []byte(cmd.Flag(blobDataFlag).Value.String()), appconsts.ShareVersionZero)
 			if err != nil {
 				panic(err)
 			}
-			return DemoSubmitData(fmt.Sprintf("%s:%s", cfg.IP, cfg.GRPCPort), ring, ns, blob)
+            grpcAddr := fmt.Sprintf("%s:%s", coreCfg.IP, coreCfg.GRPCPort)
+			return DemoSubmitData(grpcAddr, keyringCfg.KeyringAccName, ring, ns, blob)
 		},
 	}
 	for _, set := range fsets {
@@ -204,7 +263,7 @@ func Submit(fsets ...*flag.FlagSet) *cobra.Command {
 // to the blockchain directly via a celestia node. We can manage this keyring
 // using the `celestia-appd keys` or `celestia keys` sub commands and load this
 // keyring from a file and use it to programmatically sign transactions.
-func DemoSubmitData(grpcAddr string, kr keyring.Keyring, ns namespace.Namespace, blob *tmproto.Blob) error {
+func DemoSubmitData(grpcAddr string, accountName string, kr keyring.Keyring, ns namespace.Namespace, blob *tmproto.Blob) error {
 	// create an encoding config that can decode and encode all celestia-app
 	// data structures.
 	ecfg := encoding.MakeConfig(app.ModuleEncodingRegisters...)
@@ -217,7 +276,7 @@ func DemoSubmitData(grpcAddr string, kr keyring.Keyring, ns namespace.Namespace,
 	defer conn.Close()
 
 	// get the address of the account we want to use to sign transactions.
-	rec, err := kr.Key("my_celes_key")
+	rec, err := kr.Key(accountName)
 	if err != nil {
 		return err
 	}
