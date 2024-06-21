@@ -67,10 +67,12 @@ type (
 )
 
 const (
-	nodeStoreFlag = "node.store"
-	coreFlag      = "core.ip"
-	coreRPCFlag   = "core.rpc.port"
-	coreGRPCFlag  = "core.grpc.port"
+	nodeStoreFlag     = "node.store"
+	coreFlag          = "core.ip"
+	coreRPCFlag       = "core.rpc.port"
+	coreGRPCFlag      = "core.grpc.port"
+	blobNamespaceFlag = "blob.namespace"
+	blobDataFlag      = "blob.data"
 )
 
 // CoreConfig combines all configuration fields for managing the relationship with a Core node.
@@ -105,6 +107,16 @@ func NodeFlags() *flag.FlagSet {
 		coreGRPCFlag,
 		"9090",
 		"Set a custom gRPC port for the core node connection. The --core.ip flag must also be provided.",
+	)
+	flag.String(
+		blobNamespaceFlag,
+		"1234567890",
+		"The namespace of the blob to submit",
+	)
+	flag.String(
+		blobDataFlag,
+		"some data",
+		"The blob data to submit",
 	)
 
 	return flags
@@ -174,7 +186,12 @@ func Submit(fsets ...*flag.FlagSet) *cobra.Command {
 				panic(err)
 			}
 			cfg := ParseCoreConfig(ctx)
-			return DemoSubmitData(fmt.Sprintf("%s:%s", cfg.IP, cfg.GRPCPort), ring)
+			ns := namespace.MustNewV0([]byte(cmd.Flag(blobNamespaceFlag).Value.String()))
+			blob, err := blobtypes.NewBlob(ns, []byte(cmd.Flag(blobDataFlag).Value.String()), appconsts.ShareVersionZero)
+			if err != nil {
+				panic(err)
+			}
+			return DemoSubmitData(fmt.Sprintf("%s:%s", cfg.IP, cfg.GRPCPort), ring, ns, blob)
 		},
 	}
 	for _, set := range fsets {
@@ -187,7 +204,7 @@ func Submit(fsets ...*flag.FlagSet) *cobra.Command {
 // to the blockchain directly via a celestia node. We can manage this keyring
 // using the `celestia-appd keys` or `celestia keys` sub commands and load this
 // keyring from a file and use it to programmatically sign transactions.
-func DemoSubmitData(grpcAddr string, kr keyring.Keyring) error {
+func DemoSubmitData(grpcAddr string, kr keyring.Keyring, ns namespace.Namespace, blob *tmproto.Blob) error {
 	// create an encoding config that can decode and encode all celestia-app
 	// data structures.
 	ecfg := encoding.MakeConfig(app.ModuleEncodingRegisters...)
@@ -213,13 +230,6 @@ func DemoSubmitData(grpcAddr string, kr keyring.Keyring) error {
 	// Setup the signer. This function will automatically query the relevant
 	// account information such as sequence (nonce) and account number.
 	signer, err := user.SetupSigner(context.TODO(), kr, conn, addr, ecfg)
-	if err != nil {
-		return err
-	}
-
-	ns := namespace.MustNewV0([]byte("1234567890"))
-
-	blob, err := blobtypes.NewBlob(ns, []byte("some data"), appconsts.ShareVersionZero)
 	if err != nil {
 		return err
 	}
